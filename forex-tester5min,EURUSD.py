@@ -1,36 +1,67 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 # ==========================================
 # 【1. 設定・準備ブロック】
 # ==========================================
-file_path = r'C:\market_data\USDJPY_M5.csv'
+file_path = r'C:\market_data\EURUSD_M5.csv' 
 
-# パラメータ (ドル円5分足用)
+# --- パラメータ設定 ---
 SPREAD_PIPS = 1.0           # スプレッド(pips)
-SL_PIPS = 15.0              # 損切り幅(pips) - 10から15へ少し広げ、ノイズ回避
-TP_PIPS = 30.0              # 利確幅(pips) - リスクリワード1:2を確保
-SLOPE_THRESH = 0.01         # 角度フィルター
+SL_PIPS = 12.0              # 損切り幅(pips)
+TP_PIPS = 24.0              # 利確幅(pips)
+SLOPE_THRESH_PIPS = 2.0     # 傾きフィルター(pips換算)
 RISK_PERCENT = 0.01         # 1トレードの許容損失(1%)
-INITIAL_CAPITAL = 100000    # 初期資金
-MAX_LOTS = 100.0            # 最大ロット(100ロット=1000万通貨)
+INITIAL_CAPITAL = 100000    # 初期資金(円)
+MAX_LOTS = 100.0            # 最大ロット
 
-# FX計算用定数
-PIPS_UNIT = 0.01            # ドル円は0.01
-CONTRACT_SIZE = 100000      # 1ロットあたりの通貨数
+# --- 通貨ペア特性の自動判定 ---
+# データの最初の数行だけ読み込んで判定（errors='ignore'を削除）
+try:
+    temp_df = pd.read_csv(file_path, nrows=5, header=0, encoding='utf-8')
+except:
+    temp_df = pd.read_csv(file_path, nrows=5, header=0, encoding='shift-jis')
 
-# 1. データの読み込み
+# 列名クリーニング（カッコを除去して大文字化）
+temp_df.columns = [c.replace('<','').replace('>','').upper() for c in temp_df.columns]
+
+# CLOSE列を探してサンプル価格を取得
+if 'CLOSE' in temp_df.columns:
+    price_sample = temp_df['CLOSE'].iloc[0]
+else:
+    # 列名が見つからない場合のフォールバック（最初の数値列を探すなど）
+    price_sample = temp_df.select_dtypes(include=[np.number]).iloc[0, 0]
+
+if price_sample < 50:
+    PIPS_UNIT = 0.0001      # EURUSD等
+    PIP_VALUE_JPY = 1500    # 1ロットで1pip動いた時の円価値 (10ドル×150円想定)
+    pair_label = "EURUSD (ドルストレート)"
+else:
+    PIPS_UNIT = 0.01        # USDJPY等
+    PIP_VALUE_JPY = 1000    # 1ロットで1pip動いた時の円価値 (1000円)
+    pair_label = "USDJPY/CrossJPY (円ペア)"
+
+SLOPE_THRESH = SLOPE_THRESH_PIPS * PIPS_UNIT
+
+# 1. 本データの読み込み
 try:
     df = pd.read_csv(file_path, header=0, encoding='utf-8')
 except:
     df = pd.read_csv(file_path, header=0, encoding='shift-jis')
 
-rename_dict = {'<DTYYYYMMDD>':'Date','<TIME>':'Time','<OPEN>':'Open','<HIGH>':'High','<LOW>':'Low','<CLOSE>':'Close'}
+# 列名正規化
+rename_dict = {
+    '<DTYYYYMMDD>':'Date','<TIME>':'Time','<OPEN>':'Open','<HIGH>':'High','<LOW>':'Low','<CLOSE>':'Close',
+    'DATE':'Date', 'TIME':'Time', 'OPEN':'Open', 'HIGH':'High', 'LOW':'Low', 'CLOSE':'Close'
+}
 df.rename(columns=rename_dict, inplace=True, errors='ignore')
 
 if 'Date' in df.columns:
-    df['Time'] = pd.to_datetime(df['Date'].astype(str) + df['Time'].astype(str).str.zfill(4), format='%Y%m%d%H%M')
+    # Timeが数値（4桁）の場合に備えてzfill
+    df['Time'] = pd.to_datetime(df['Date'].astype(str) + df['Time'].astype(str).str.zfill(4), format='%Y%m%d%H%M', errors='coerce')
+    df.dropna(subset=['Time'], inplace=True)
     df.set_index('Time', inplace=True)
 
 df = df[['Open', 'High', 'Low', 'Close']].copy()
@@ -39,30 +70,21 @@ df = df[['Open', 'High', 'Low', 'Close']].copy()
 # 【2. インジケータ・シグナル計算ブロック】
 # ==========================================
 
-# 指標計算
 df['EMA_short'] = df['Close'].ewm(span=20, adjust=False).mean()
 df['EMA_long'] = df['Close'].ewm(span=80, adjust=False).mean()
 df['EMA_trend'] = df['Close'].ewm(span=200, adjust=False).mean()
 df['EMA_slope'] = df['EMA_long'].diff(5)
 
-# ATR(ボラティリティ)計算
-high_low = df['High'] - df['Low']
-high_close = np.abs(df['High'] - df['Close'].shift())
-low_close = np.abs(df['Low'] - df['Close'].shift())
-df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
-
-# 時間帯フィルター (日本時間16時〜翌2時)
+# 時間帯フィルター
 df['hour'] = df.index.hour
 time_filter = (df['hour'] >= 16) | (df['hour'] < 2)
 
-# ロジック改良：トレンド方向かつ「短期EMAへの引きつけ」を確認
-# BUY: 長期トレンド上向き ＋ 価格が短期EMA以下（押し目） ＋ 傾きプラス
+# ロジック：押し目買い・戻り売り
 buy_cond = (df['Close'] > df['EMA_trend']) & \
            (df['EMA_short'] > df['EMA_long']) & \
            (df['Close'] < df['EMA_short']) & \
            (df['EMA_slope'] > SLOPE_THRESH) & time_filter
 
-# SELL: 長期トレンド下向き ＋ 価格が短期EMA以上（戻り） ＋ 傾きマイナス
 sell_cond = (df['Close'] < df['EMA_trend']) & \
             (df['EMA_short'] < df['EMA_long']) & \
             (df['Close'] > df['EMA_short']) & \
@@ -81,12 +103,11 @@ def run_backtest(df):
     history = [INITIAL_CAPITAL]
     trades = []
     
-    curr_pos = 0 # 1:Buy, -1:Sell, 0:None
+    curr_pos = 0 
     entry_price = 0
     entry_time = None
     lots = 0
     
-    # 高速化のためnumpy配列に変換
     times = df.index
     opens = df['Open'].values
     highs = df['High'].values
@@ -95,30 +116,25 @@ def run_backtest(df):
     signals = df['signal'].values
     
     for i in range(1, len(df)):
-        # ポジション保有中の場合
         if curr_pos != 0:
-            # 損益判定 (High/Lowをチェック)
             exit_price = 0
             reason = ""
             
-            if curr_pos == 1: # BUYポジション
+            if curr_pos == 1:
                 sl_price = entry_price - (SL_PIPS * PIPS_UNIT)
                 tp_price = entry_price + (TP_PIPS * PIPS_UNIT)
-                
                 if lows[i] <= sl_price:
                     exit_price = sl_price
                     reason = "SL"
                 elif highs[i] >= tp_price:
                     exit_price = tp_price
                     reason = "TP"
-                elif signals[i] == -1: # 反転シグナル
+                elif signals[i] == -1:
                     exit_price = opens[i]
                     reason = "Reverse"
-            
-            else: # SELLポジション
+            else:
                 sl_price = entry_price + (SL_PIPS * PIPS_UNIT)
                 tp_price = entry_price - (TP_PIPS * PIPS_UNIT)
-                
                 if highs[i] >= sl_price:
                     exit_price = sl_price
                     reason = "SL"
@@ -130,13 +146,12 @@ def run_backtest(df):
                     reason = "Reverse"
             
             if exit_price != 0:
-                # 決済処理
                 pips_diff = (exit_price - entry_price) * curr_pos / PIPS_UNIT
                 net_pips = pips_diff - SPREAD_PIPS
-                # 円貨換算利益 (USDJPYの場合 pips * 100 * ロット数)
-                profit_yen = net_pips * 100 * lots
-                balance += profit_yen
+                # 円貨換算利益
+                profit_yen = net_pips * PIP_VALUE_JPY * lots
                 
+                balance += profit_yen
                 trades.append({
                     'entry_time': entry_time, 'exit_time': times[i],
                     'type': 'BUY' if curr_pos == 1 else 'SELL',
@@ -147,22 +162,20 @@ def run_backtest(df):
                 if balance <= 0: break
                 continue
 
-        # 新規エントリー判定
         if curr_pos == 0 and signals[i] != 0:
-            # ロット計算 (リスク1%)
-            # 1pips動いた時の価値 = 100円 (1ロット10万通貨時)
             risk_amount = balance * RISK_PERCENT
-            lots = risk_amount / (SL_PIPS * 100)
+            # ロット算出：許容損失額 / (損切りpips * 1pipの価値)
+            # 例: 1000円のリスク / (12pips * 1500円) = 0.055ロット
+            lots = risk_amount / (SL_PIPS * PIP_VALUE_JPY)
             if lots > MAX_LOTS: lots = MAX_LOTS
             
-            if lots > 0.01: # 最小ロット制限
+            if lots > 0.01:
                 curr_pos = signals[i]
-                entry_price = opens[i] # 信号の次の足の始値で入る(現実的)
+                entry_price = opens[i]
                 entry_time = times[i]
                 
     return pd.DataFrame(trades), history
 
-# 実行
 trade_df, balance_history = run_backtest(df)
 
 # ==========================================
@@ -170,15 +183,18 @@ trade_df, balance_history = run_backtest(df)
 # ==========================================
 def show_report(tdf, b_hist):
     if tdf.empty:
-        print("トレードが発生しませんでした。")
+        print("トレードが発生しませんでした。設定やデータのパスを確認してください。")
         return
 
     win_rate = (tdf['pips'] > 0).sum() / len(tdf) * 100
-    pf = tdf.loc[tdf['pips'] > 0, 'profit'].sum() / abs(tdf.loc[tdf['pips'] <= 0, 'profit'].sum())
+    pos_profit = tdf.loc[tdf['profit'] > 0, 'profit'].sum()
+    neg_profit = abs(tdf.loc[tdf['profit'] <= 0, 'profit'].sum())
+    pf = pos_profit / neg_profit if neg_profit != 0 else float('inf')
+    
     max_dd = (pd.Series(b_hist).cummax() - pd.Series(b_hist)).max()
 
     print(f"\n{'='*45}")
-    print(f"  USDJPY 5分足 実運用検証レポート")
+    print(f"  {pair_label} 実運用検証レポート")
     print(f"{'='*45}")
     print(f"総トレード数   : {len(tdf)} 回")
     print(f"勝率           : {win_rate:.1f} %")
@@ -188,12 +204,17 @@ def show_report(tdf, b_hist):
     print(f"平均pips(1回)  : {tdf['pips'].mean():.2f} pips")
     print(f"{'='*45}")
 
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(12, 8))
+    plt.subplot(2, 1, 1)
     plt.plot(b_hist, color='blue', lw=1.5)
-    plt.title('USDJPY Strategy: Equity Curve (Compounding)')
-    plt.xlabel('Trade Count')
-    plt.ylabel('Balance (JPY)')
+    plt.title(f'{pair_label} Equity Curve')
     plt.grid(True)
+
+    plt.subplot(2, 1, 2)
+    plt.hist(tdf['pips'], bins=50, color='gray', alpha=0.7)
+    plt.axvline(0, color='red', linestyle='--')
+    plt.title('Pips Distribution')
+    plt.tight_layout()
     plt.show()
 
 show_report(trade_df, balance_history)
