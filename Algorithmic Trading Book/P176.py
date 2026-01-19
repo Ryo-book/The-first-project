@@ -26,4 +26,4 @@ if __name__ == '__main__':
     bb.plot_data()
 
 
-%run BacktestBase.py
+run BacktestBase.py
