@@ -1,5 +1,7 @@
 #P94.ipynb　このファイルでSMAVectorBacktesterを使うために必要なコードファイル
 
+#一旦P94は保留（難しい…）
+
 
 import numpy as np
 import pandas as pd
@@ -61,7 +63,31 @@ class SMAVectorBacktester:
         print("cumstrat:", cumstrat.iloc[-1])
 
         return data
+    
+    def optimize_parameters(self, SMA1_range, SMA2_range):
+        best_performance = -np.inf
+        best_params = None
+        
+        for SMA1 in range(*SMA1_range):
+            for SMA2 in range(*SMA2_range):
+                self.SMA1 = SMA1
+                self.SMA2 = SMA2
+                
+                data = self.run_strategy()
+                perf = data['strategy'].sum()
+                
+                if perf > best_performance:
+                    best_performance = perf
+                    best_params = (SMA1, SMA2)
+                    
+        return best_params, best_performance
 
+   
+
+
+#=====================================
+#実行コードはこのファイルには絶対書かない
+#=====================================
 
 
 
@@ -70,3 +96,8 @@ class SMAVectorBacktester:
 #=======================================================
 #import SMAVectorBacktester as SMAを読み込むためのファイル
 #=======================================================
+
+
+
+
+# NaNを削除（ここが超重要） SMA計算とposition（ポジション）とreturns（対数収益率）とstrategy（戦略収益）の3つのコードの下にこれを置かないと、どれかが必ずNaNとなってしまう。
