@@ -88,7 +88,7 @@ def calc_metrics(g):
 
 
 # symbol×timeframeごとにcalc_metricsを実行し、結果をまとめる
-result = df.groupby(['symbol','timeframe'], observed=True).apply(calc_metrics)
+result = df.groupby(['symbol','timeframe'], observed=True).apply(calc_metrics)    #データサイエンスハンドブック P184
 
 
 
