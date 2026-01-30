@@ -54,7 +54,7 @@ def summarize(df):
 # =========================
 # ⑥実行部分（ここが重要）
 # =========================
-if __name__ == "__main__":
+if __name__ == "__main__":  #ここにCSVをのせることで、このファイルを直接実行した時だけ動くようにできる。
     df = load_data("USDJPY.csv")
     df = add_indicators(df, ma_period=20)
     df = generate_signal(df)
